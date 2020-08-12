@@ -1,0 +1,83 @@
+name: Android Shell App
+
+on:
+  workflow_dispatch:
+    inputs:
+      releaseShellAndroid:
+        description: 'type "release-shell-android" to confirm upload'
+        required: false
+  schedule:
+    - cron: '20 5 * * 2,4,6'
+  push:
+    paths:
+      - .github/workflows/shell-app-android.yml
+
+jobs:
+  build:
+    runs-on: ubuntu-18.04
+    env:
+      GIT_CRYPT_KEY_BASE64: ${{ secrets.GIT_CRYPT_KEY_BASE64 }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: true
+      - name: Get cache key of git lfs files
+        id: git-lfs
+        run: echo "::set-output name=sha256::$(git lfs ls-files | openssl dgst -sha256)"
+      - uses: actions/cache@v2
+        with:
+          path: .git/lfs
+          key: ${{ steps.git-lfs.outputs.sha256 }}
+      - run: git lfs pull
+      - name: Get yarn cache directory path
+        id: yarn-cache-dir-path
+        run: echo "::set-output name=dir::$(yarn cache dir)"
+      - run: echo "::add-path::$(pwd)/bin"
+      - run: echo "::set-env name=EXPO_ROOT_DIR::$(pwd)"
+      - uses: ruby/setup-ruby@v1
+      - name: bundler cache
+        uses: actions/cache@v1
+        with:
+          path: vendor/bundle
+          key: ${{ runner.os }}-gems-${{ hashFiles('.ruby-version') }}-${{ hashFiles('Gemfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-gems-
+      - run: echo "::set-env name=BUNDLE_BIN::$(pwd)/.direnv/bin"
+      - run: echo "::add-path::$BUNDLE_BIN"
+      - name: Run bundle install
+        run: |
+          bundle config path vendor/bundle
+          bundle install --jobs 4 --retry 3
+      - run: sudo apt-get install awscli git-crypt
+      - name: decrypt secrets if possible
+        run: |
+          if [ -z "${GIT_CRYPT_KEY_BASE64}" ]; then
+            echo 'git-crypt key not present in environment'
+          else
+            git crypt unlock <(echo $GIT_CRYPT_KEY_BASE64 | base64 --decode)
+          fi
+      - name: Save S3 URI
+        run: echo "::set-env name=S3_URI::s3://exp-artifacts/android-shell-builder-${{ github.sha }}.tar.gz"
+      # - name: Check that Android packages are up-to-date
+      #   run: expotools check-android-packages
+      - name: Build and upload shell app tarball
+        run: |
+          aws s3 ls $S3_URI || {
+            ./buildAndroidTarballLocally.sh
+            aws s3 cp --acl public-read artifacts/android-shell-builder.tar.gz $S3_URI
+          }
+          echo "Release tarball uploaded to $S3_URI"
+          echo "You can deploy this by updating or creating a new file in https://github.com/expo/turtle/tree/master/shellTarballs/android"
+          echo "Then follow the deployment instructions: https://github.com/expo/turtle-deploy"
+      # - uses: 8398a7/action-slack@v3
+      #   if: always()
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #     SLACK_WEBHOOK_URL: ${{ secrets.slack_webhook_android }}
+      #   with:
+      #     channel: '#platform-android'
+      #     status: ${{ job.status }}
+      #     fields: job,eventName
+      #     author_name: Android Shell App (triggered by ${{ github.actor }})
